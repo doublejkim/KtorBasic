@@ -1,0 +1,129 @@
+package com.example.common.validation
+
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.ktor.server.application.*
+import io.ktor.server.request.*
+import kotlin.reflect.KParameter
+import kotlin.reflect.KType
+import kotlin.reflect.full.createType
+import kotlin.reflect.full.findAnnotation
+import kotlin.reflect.full.isSubtypeOf
+import kotlin.reflect.full.memberProperties
+
+// Binder 는 사실 작성안해도 되는데 연습삼아..
+@Target(AnnotationTarget.PROPERTY)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class RequestInfo(
+    val name: String,
+    val source: RequestSource,
+    val required: Boolean = false
+)
+
+@Target(AnnotationTarget.CLASS)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class MyRequest{}
+
+enum class RequestSource {
+    PATH, QUERY, BODY
+}
+
+object RequestBinder {
+
+    @PublishedApi
+    internal val objectMapper = jacksonObjectMapper()
+
+    suspend inline fun <reified T : Any> post(call: ApplicationCall) {
+        val clazz = T::class
+
+        if (clazz.findAnnotation<MyRequest>() == null) {
+            TODO("add exception")
+        }
+
+        val body: JsonNode? = try {
+            call.receiveText().let{ text ->
+                if (text.isNotBlank()) objectMapper.readTree(text) else null
+            }
+        } catch(e: Exception) {
+            TODO("add exception")
+        }
+
+        val constructor = clazz.constructors.first()
+        val arguments = mutableMapOf<KParameter, Any?>()
+
+        for (parameter in constructor.parameters) {
+            val property = clazz.memberProperties.find { it.name == parameter.name }
+            val annotation = property?.findAnnotation<RequestInfo>()
+
+            if (annotation == null) { // RequestInfo 어노테이션이 없으면 skip
+                continue
+            }
+
+            val paramName = annotation.name.ifEmpty { parameter.name }
+
+            val value = when (annotation.source) {
+                RequestSource.BODY -> {
+                    body?.get(paramName)?.let {
+                        convertJsonNodeToType(it, parameter.type)
+                    }
+                }
+                else -> {
+                    TODO("exception")
+                }
+            }
+
+            if (annotation.required && value == null) {
+                TODO("exeption")
+            }
+
+            if (value != null || parameter.type.isMarkedNullable) {
+                arguments[parameter] = value
+            }
+        }
+    }
+
+    fun convertJsonNodeToType(node: JsonNode, type: KType): Any? {
+        return when {
+            node.isNull -> null
+
+            // 문자열
+            type.isSubtypeOf(String::class.createType()) -> when {
+                node.isNull -> ""
+                else -> node.asText()
+            }
+
+            // Long 타입 - 다양한 입력 형식 처리
+            type.isSubtypeOf(Long::class.createType()) -> when {
+                node.isNumber -> node.asLong()
+                node.isTextual -> try { node.asText().toLong() } catch (e: kotlin.Exception) { null }
+                node.isBoolean -> if (node.asBoolean()) 1L else 0L
+                else -> 0
+            }
+
+            // Int 타입
+            type.isSubtypeOf(Int::class.createType()) -> when {
+                node.isNumber -> node.asInt()
+                node.isTextual -> try { node.asText().toInt() } catch (e: kotlin.Exception) { null }
+                node.isBoolean -> if (node.asBoolean()) 1 else 0
+                else -> 0
+            }
+
+            // Double 타입
+            type.isSubtypeOf(Double::class.createType()) -> when {
+                node.isNumber -> node.asDouble()
+                node.isTextual -> try { node.asText().toDouble() } catch (e: kotlin.Exception) { null }
+                else -> 0
+            }
+
+            // Boolean 타입
+            type.isSubtypeOf(Boolean::class.createType()) -> when {
+                node.isBoolean -> node.asBoolean()
+                node.isTextual -> node.asText().lowercase() == "true"
+                node.isNumber -> node.asInt() != 0
+                else -> false
+            }
+
+            else -> null
+        }
+    }
+}
