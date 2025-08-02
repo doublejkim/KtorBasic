@@ -1,5 +1,7 @@
 package com.example.common.validation
 
+import com.example.common.exception.CustomException
+import com.example.common.exception.ErrorCode
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.ktor.server.application.*
@@ -33,11 +35,16 @@ object RequestBinder {
     @PublishedApi
     internal val objectMapper = jacksonObjectMapper()
 
-    suspend inline fun <reified T : Any> post(call: ApplicationCall) {
+    sealed class BindResult<out T> {
+        data class Success<T>(val data: T) : BindResult<T>()
+        data class Error(val error: String) : BindResult<Nothing>()
+    }
+
+    suspend inline fun <reified  T : Any> post(call: ApplicationCall) : BindResult<T> {
         val clazz = T::class
 
         if (clazz.findAnnotation<MyRequest>() == null) {
-            TODO("add exception")
+            return BindResult.Error("Can't find annotation MyRequest")
         }
 
         val body: JsonNode? = try {
@@ -45,7 +52,7 @@ object RequestBinder {
                 if (text.isNotBlank()) objectMapper.readTree(text) else null
             }
         } catch(e: Exception) {
-            TODO("add exception")
+            throw CustomException(ErrorCode.FAILED_TO_READ_BODY_REQUEST, e.message)
         }
 
         val constructor = clazz.constructors.first()
@@ -68,21 +75,78 @@ object RequestBinder {
                     }
                 }
                 else -> {
-                    TODO("exception")
+                    throw CustomException(ErrorCode.FAILED_TO_READ_BODY_REQUEST)
                 }
             }
 
             if (annotation.required && value == null) {
                 TODO("exeption")
+                return BindResult.Error("failed to matching")
             }
 
             if (value != null || parameter.type.isMarkedNullable) {
                 arguments[parameter] = value
             }
         }
+
+        return try {
+            BindResult.Success(constructor.callBy(arguments))
+        } catch (e: Exception) {
+            BindResult.Error("constructor error : ${e.message}")
+        }
     }
 
-    fun convertJsonNodeToType(node: JsonNode, type: KType): Any? {
+    suspend inline fun <reified  T : Any> get(call: ApplicationCall) : BindResult<T> {
+        val clazz = T::class
+
+        if (clazz.findAnnotation<MyRequest>() == null) {
+            return BindResult.Error("Can't find annotation MyRequest")
+        }
+
+        val constructor = clazz.constructors.first()
+        val arguments = mutableMapOf<KParameter, Any?>()
+
+        for (parameter in constructor.parameters) {
+            val property = clazz.memberProperties.find { it.name == parameter.name }
+            val annotation = property?.findAnnotation<RequestInfo>()
+
+            if (annotation == null) { // RequestInfo 어노테이션이 없으면 skip
+                continue
+            }
+
+            val paramName = annotation.name.ifEmpty { parameter.name!! }
+
+            val value = when (annotation.source) {
+                RequestSource.PATH -> {
+                    call.parameters[paramName]
+                }
+                RequestSource.QUERY -> {
+                    call.request.queryParameters[paramName]
+                }
+                else -> {
+                    CustomException(ErrorCode.FAILED_TO_FIND_REQUEST_SOURCE)
+                }
+            }
+
+            if (annotation.required && value == null) {
+                TODO("exeption")
+                return BindResult.Error("failed to matching")
+            }
+
+            if (value != null || parameter.type.isMarkedNullable) {
+                arguments[parameter] = value
+            }
+        }
+
+        return try {
+            BindResult.Success(constructor.callBy(arguments))
+        } catch (e: Exception) {
+            BindResult.Error("constructor error : ${e.message}")
+        }
+
+    }
+
+        fun convertJsonNodeToType(node: JsonNode, type: KType): Any? {
         return when {
             node.isNull -> null
 
